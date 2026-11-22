@@ -939,6 +939,10 @@ nav.mob-nav button.on span { filter: none; opacity: 1; }
     gap: 14px;
   }
 }
+
+/* Status sinkronisasi realtime */
+#rt-pill{position:fixed;left:10px;bottom:calc(84px + env(safe-area-inset-bottom,0px));z-index:50;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;background:var(--card);color:var(--tx);border:1px solid var(--bd);box-shadow:var(--sh);cursor:pointer;user-select:none}
+@media (min-width:900px){#rt-pill{bottom:14px;left:calc(var(--sb-w) + 14px)}}
 </style>
 </head>
 <body>
@@ -1041,7 +1045,6 @@ nav.mob-nav button.on span { filter: none; opacity: 1; }
         <b id="gn"></b>
       </div>
       <div class="hd-actions">
-        <button type="button" class="theme-opt" id="cloud-sync-pill" style="background:rgba(255,255,255,.16);color:#fff;padding:7px 11px" onclick="pullDatabaseFromCloud(false)" title="Klik untuk sinkronkan seluruh data sekarang">💾 Lokal</button>
         <div class="theme-bar theme-bar-hd" data-theme-switcher></div>
         <button class="icon-btn" onclick="go('ingat')" title="Pengingat Ulang Tahun" aria-label="Pengingat">🔔<em id="bd" hidden></em></button>
       </div>
@@ -1216,7 +1219,6 @@ const INITIAL_MEMBERS = RAW_MEMBERS.map(m => ({
 
 const DEFAULT_SETTINGS = {
   waAdmin: "6281234567890",
-  cloudSyncUrl: "",
   driveWebAppUrl: "",
   driveApiKey: "",
   driveClientId: "",
@@ -1269,8 +1271,8 @@ const DEFAULT_DB = {
     }
   ],
   akun: [
-    { u: "admin", pw: "123", role: "admin", nama: "Administrator IMMA 28", memberId: "", foto: "", pendingPw: "", activeDeviceId: "", activeDeviceLabel: "", lastActiveAt: 0 },
-    { u: "anggota", pw: "123", role: "anggota", nama: "ACH. HAMDAN RUKMANA", memberId: "m_1", foto: "", pendingPw: "", activeDeviceId: "", activeDeviceLabel: "", lastActiveAt: 0 }
+    { u: "admin", pw: "123", role: "admin", nama: "Administrator IMMA 28", memberId: "", foto: "", pendingPw: "" },
+    { u: "anggota", pw: "123", role: "anggota", nama: "ACH. HAMDAN RUKMANA", memberId: "m_1", foto: "", pendingPw: "" }
   ]
 };
 
@@ -1299,7 +1301,6 @@ function loadDB() {
         if (!parsed.settings) parsed.settings = { ...DEFAULT_SETTINGS };
         if (!parsed.settings.waAdmin) parsed.settings.waAdmin = DEFAULT_SETTINGS.waAdmin;
         if (!parsed.settings.waTemplate) parsed.settings.waTemplate = DEFAULT_SETTINGS.waTemplate;
-        if (typeof parsed.settings.cloudSyncUrl !== "string") parsed.settings.cloudSyncUrl = "";
         if (typeof parsed.settings.driveWebAppUrl !== "string") parsed.settings.driveWebAppUrl = "";
         if (typeof parsed.settings.driveApiKey !== "string") parsed.settings.driveApiKey = "";
         if (typeof parsed.settings.driveClientId !== "string") parsed.settings.driveClientId = "";
@@ -1328,9 +1329,6 @@ function syncAllData(data = DB) {
   if (Array.isArray(data.akun)) {
     data.akun.forEach(acc => {
       if (typeof acc.foto !== "string") acc.foto = "";
-      if (typeof acc.activeDeviceId !== "string") acc.activeDeviceId = "";
-      if (typeof acc.activeDeviceLabel !== "string") acc.activeDeviceLabel = "";
-      if (typeof acc.lastActiveAt !== "number") acc.lastActiveAt = 0;
       if (acc.memberId && memberById.has(acc.memberId)) {
         const mem = memberById.get(acc.memberId);
         acc.nama = mem.nama;
@@ -1417,239 +1415,29 @@ function syncAllData(data = DB) {
   }
 }
 
-// ==================== ENGINE SINKRONISASI REAL-TIME (LOKAL & CLOUD DEPLOY) ====================
-const DEVICE_ID_KEY = "IMMA28_DEVICE_ID";
-const INACTIVITY_LIMIT_MS = 10 * 60 * 1000; // 10 Menit tanpa interaksi = wajib login ulang
-const HEARTBEAT_INTERVAL_MS = 30 * 1000; // Perbarui detak sesi aktif setiap 30 detik
-const CLOUD_POLL_INTERVAL_MS = 12 * 1000; // Cek pembaruan data dari device lain setiap 12 detik
-
-let lastInteractionAt = Date.now();
-let inactivityTimerId = null;
-let heartbeatTimerId = null;
-let cloudPollTimerId = null;
-let cloudSyncStatus = "lokal"; // 'lokal' | 'syncing' | 'terhubung' | 'error'
-let isPushingCloud = false;
-let pendingCloudPush = false;
-
-function getDeviceId() {
-  try {
-    let id = localStorage.getItem(DEVICE_ID_KEY);
-    if (!id) {
-      id = "dev_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
-      localStorage.setItem(DEVICE_ID_KEY, id);
-    }
-    return id;
-  } catch (e) {
-    if (!window.__IMMA_TEMP_DEV_ID) {
-      window.__IMMA_TEMP_DEV_ID = "dev_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
-    }
-    return window.__IMMA_TEMP_DEV_ID;
-  }
-}
-
-function getDeviceLabel() {
-  const ua = navigator.userAgent || "";
-  let os = "Perangkat";
-  if (/Android/i.test(ua)) os = "Android";
-  else if (/iPhone|iPad|iPod/i.test(ua)) os = "iOS";
-  else if (/Windows/i.test(ua)) os = "Windows";
-  else if (/Mac/i.test(ua)) os = "Mac";
-  else if (/Linux/i.test(ua)) os = "Linux";
-
-  let browser = "Browser";
-  if (/Edg\//i.test(ua)) browser = "Edge";
-  else if (/Chrome\//i.test(ua) && !/Edg\//i.test(ua)) browser = "Chrome";
-  else if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua)) browser = "Safari";
-  else if (/Firefox\//i.test(ua)) browser = "Firefox";
-
-  return `${os} (${browser})`;
-}
-
-const syncChannel = ("BroadcastChannel" in window) ? new BroadcastChannel("IMMA28_REALTIME_SYNC") : null;
-if (syncChannel) {
-  syncChannel.onmessage = (ev) => {
-    if (ev.data && ev.data.type === "DB_UPDATED" && ev.data.payload) {
-      applyIncomingDatabase(ev.data.payload, false);
-    }
-  };
-}
-
-function getEffectiveCloudUrl(data = DB) {
-  const fromSettings = (data?.settings?.cloudSyncUrl || "").trim();
-  if (fromSettings) return fromSettings;
-  const fromDrive = (data?.settings?.driveWebAppUrl || "").trim();
-  if (fromDrive) return fromDrive;
-  return "";
-}
-
-function updateCloudBadgeUI() {
-  const el = $("#cloud-sync-pill");
-  if (!el) return;
-  const hasCloud = Boolean(getEffectiveCloudUrl());
-  if (!hasCloud) {
-    el.innerHTML = `<span title="Sinkronisasi antar tab aktif. Atur URL Cloud di Panel Admin agar sinkron antar device setelah deploy.">💾 Lokal</span>`;
-    return;
-  }
-  if (cloudSyncStatus === "syncing") {
-    el.innerHTML = `<span>🔄 Sinkron...</span>`;
-  } else if (cloudSyncStatus === "terhubung") {
-    el.innerHTML = `<span>☁️ Tersinkron</span>`;
-  } else if (cloudSyncStatus === "error") {
-    el.innerHTML = `<span>⚠️ Offline</span>`;
-  } else {
-    el.innerHTML = `<span>☁️ Cloud</span>`;
-  }
-}
-
-function applyIncomingDatabase(incoming, saveToLocal = true) {
-  if (!incoming || !Array.isArray(incoming.members) || !Array.isArray(incoming.akun)) return;
-  const incomingTs = Number(incoming._updatedAt || 0);
-  const currentTs = Number(DB._updatedAt || 0);
-  if (incomingTs && currentTs && incomingTs < currentTs) return;
-
-  // Pertahankan URL cloud lokal jika data masuk kosong
-  const localCloudUrl = DB.settings?.cloudSyncUrl || "";
-  DB = incoming;
-  if (!DB.settings) DB.settings = { ...DEFAULT_SETTINGS };
-  if (!DB.settings.cloudSyncUrl && localCloudUrl) DB.settings.cloudSyncUrl = localCloudUrl;
-
-  syncAllData(DB);
-  if (saveToLocal) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(DB)); } catch (e) {}
-  }
-
-  if (ses) {
-    const refreshedSes = DB.akun.find(a => a.u === ses.u);
-    if (!refreshedSes) {
-      forceLogoutWithReason("Akun Anda telah dihapus oleh Admin.");
-      return;
-    }
-    const myDevId = getDeviceId();
-    if (refreshedSes.activeDeviceId && refreshedSes.activeDeviceId !== myDevId && isDeviceSessionStillAlive(refreshedSes)) {
-      forceLogoutWithReason(`Akun ini sedang aktif di perangkat lain (${refreshedSes.activeDeviceLabel || "Device lain"}).`);
-      return;
-    }
-    ses = refreshedSes;
-    admin = ses.role === "admin";
-    render();
-  }
-}
-
-async function pushDatabaseToCloud(data = DB) {
-  const cloudUrl = getEffectiveCloudUrl(data);
-  if (!cloudUrl) {
-    cloudSyncStatus = "lokal";
-    updateCloudBadgeUI();
-    return;
-  }
-  if (isPushingCloud) {
-    pendingCloudPush = true;
-    return;
-  }
-  isPushingCloud = true;
-  cloudSyncStatus = "syncing";
-  updateCloudBadgeUI();
-
-  try {
-    const isFirebase = /\.firebaseio\.com/i.test(cloudUrl) || /firebasedatabase\.app/i.test(cloudUrl);
-    if (isFirebase) {
-      const targetUrl = cloudUrl.endsWith(".json") ? cloudUrl : cloudUrl.replace(/\/$/, "") + "/imma28_db.json";
-      const res = await fetch(targetUrl, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data)
-      });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-    } else {
-      // Google Apps Script Web App / Custom REST Endpoint
-      const res = await fetch(cloudUrl, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ action: "save_db", db: data, updatedAt: data._updatedAt || Date.now() })
-      });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-    }
-    cloudSyncStatus = "terhubung";
-  } catch (err) {
-    cloudSyncStatus = "error";
-  } finally {
-    isPushingCloud = false;
-    updateCloudBadgeUI();
-    if (pendingCloudPush) {
-      pendingCloudPush = false;
-      pushDatabaseToCloud(DB);
-    }
-  }
-}
-
-async function pullDatabaseFromCloud(silent = true) {
-  const cloudUrl = getEffectiveCloudUrl(DB);
-  if (!cloudUrl) return false;
-  if (isPushingCloud) return false;
-
-  try {
-    const isFirebase = /\.firebaseio\.com/i.test(cloudUrl) || /firebasedatabase\.app/i.test(cloudUrl);
-    let remoteDb = null;
-
-    if (isFirebase) {
-      const targetUrl = cloudUrl.endsWith(".json") ? cloudUrl : cloudUrl.replace(/\/$/, "") + "/imma28_db.json";
-      const res = await fetch(`${targetUrl}?t=${Date.now()}`);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      remoteDb = await res.json();
-    } else {
-      const sep = cloudUrl.includes("?") ? "&" : "?";
-      const res = await fetch(`${cloudUrl}${sep}action=get_db&t=${Date.now()}`);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const parsed = await res.json();
-      if (parsed && parsed.ok && parsed.db) remoteDb = parsed.db;
-      else if (parsed && Array.isArray(parsed.members)) remoteDb = parsed;
-    }
-
-    cloudSyncStatus = "terhubung";
-    updateCloudBadgeUI();
-
-    if (remoteDb && Array.isArray(remoteDb.members) && Array.isArray(remoteDb.akun)) {
-      const remoteTs = Number(remoteDb._updatedAt || 0);
-      const localTs = Number(DB._updatedAt || 0);
-      if (remoteTs > localTs) {
-        applyIncomingDatabase(remoteDb, true);
-        if (!silent) toast("Data terbaru berhasil disinkronkan dari server!");
-        return true;
-      } else if (localTs > remoteTs && localTs > 0) {
-        // Data lokal lebih baru (misal saat login), dorong ke cloud
-        pushDatabaseToCloud(DB);
-      }
-    } else if (!remoteDb && Number(DB._updatedAt || 0) > 0) {
-      // Cloud masih kosong, inisialisasi dari data lokal
-      pushDatabaseToCloud(DB);
-    }
-    if (!silent) toast("Seluruh data sudah dalam versi terbaru.");
-    return true;
-  } catch (err) {
-    cloudSyncStatus = "error";
-    updateCloudBadgeUI();
-    if (!silent) toast("Gagal menyinkronkan dengan server cloud: " + err.message);
-    return false;
-  }
-}
-
-function saveDB(data = DB, skipCloud = false) {
+var rtReady = false;
+function saveDB(data = DB) {
   syncAllData(data);
-  data._updatedAt = Date.now();
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (e) {}
-  if (syncChannel) {
-    try { syncChannel.postMessage({ type: "DB_UPDATED", payload: data }); } catch (e) {}
-  }
-  if (!skipCloud) {
-    pushDatabaseToCloud(data);
-  }
+  if (rtReady && data === DB) rtSchedulePush();
 }
 
 window.addEventListener("storage", e => {
   if (e.key === STORAGE_KEY && e.newValue) {
     try {
       const updated = JSON.parse(e.newValue);
-      applyIncomingDatabase(updated, false);
+      if (updated && Array.isArray(updated.members)) {
+        DB = updated;
+        syncAllData(DB);
+        if (ses) {
+          const refreshedSes = DB.akun.find(a => a.u === ses.u);
+          if (refreshedSes) {
+            ses = refreshedSes;
+            admin = ses.role === "admin";
+          }
+          render();
+        }
+      }
     } catch (err) {}
   }
 });
@@ -1768,115 +1556,12 @@ function formatWaLink(tg) {
   return `https://wa.me/${waNum}?text=${encodeURIComponent(text)}`;
 }
 
-// ==================== AUTHENTICATION, SINGLE-DEVICE LOCK & 10-MIN TIMEOUT ====================
-function isDeviceSessionStillAlive(acc) {
-  if (!acc || !acc.activeDeviceId || !acc.lastActiveAt) return false;
-  return (Date.now() - Number(acc.lastActiveAt)) < INACTIVITY_LIMIT_MS;
-}
-
-function forceLogoutWithReason(reasonMsg) {
-  stopSessionWatchers();
-  const myDevId = getDeviceId();
-  if (ses) {
-    const accInDb = DB.akun.find(x => x.u === ses.u);
-    if (accInDb && accInDb.activeDeviceId === myDevId) {
-      accInDb.activeDeviceId = "";
-      accInDb.activeDeviceLabel = "";
-      accInDb.lastActiveAt = 0;
-      saveDB();
-    }
-  }
-  try {
-    localStorage.removeItem("IMMA28_SES_U");
-    localStorage.removeItem("IMMA28_LAST_ACTIVE");
-  } catch (e) {}
-  ses = null;
-  admin = false;
-  closeM();
-  $("#app").hidden = true;
-  $("#login").hidden = false;
-  $("#lp").value = "";
-  const lm = $("#lm");
-  if (lm) lm.textContent = reasonMsg || "Sesi berakhir. Silakan login kembali.";
-  if (reasonMsg) toast(reasonMsg);
-}
-
-function recordUserActivity() {
-  if (!ses) return;
-  const now = Date.now();
-  // Cek apakah sudah melewati batas 10 menit sebelum interaksi baru ini terjadi
-  if (now - lastInteractionAt >= INACTIVITY_LIMIT_MS) {
-    forceLogoutWithReason("Sesi berakhir otomatis karena tidak ada interaksi selama 10 menit. Silakan login ulang.");
-    return;
-  }
-  lastInteractionAt = now;
-  try { localStorage.setItem("IMMA28_LAST_ACTIVE", String(now)); } catch (e) {}
-}
-
-function startSessionWatchers() {
-  stopSessionWatchers();
-  lastInteractionAt = Date.now();
-  try { localStorage.setItem("IMMA28_LAST_ACTIVE", String(lastInteractionAt)); } catch (e) {}
-
-  // Pantau ketidakaktifan 10 menit setiap 5 detik
-  inactivityTimerId = setInterval(() => {
-    if (!ses) return;
-    let storedLast = lastInteractionAt;
-    try {
-      const lsVal = Number(localStorage.getItem("IMMA28_LAST_ACTIVE") || 0);
-      if (lsVal > storedLast) storedLast = lsVal;
-    } catch (e) {}
-
-    if (Date.now() - storedLast >= INACTIVITY_LIMIT_MS) {
-      forceLogoutWithReason("Tidak ada interaksi selama 10 menit. Demi keamanan, Anda wajib login ulang.");
-    }
-  }, 5000);
-
-  // Perbarui heartbeat sesi device aktif agar device lain tahu akun ini masih aktif
-  heartbeatTimerId = setInterval(() => {
-    if (!ses) return;
-    const myDevId = getDeviceId();
-    const accInDb = DB.akun.find(x => x.u === ses.u);
-    if (!accInDb) return;
-
-    if (accInDb.activeDeviceId && accInDb.activeDeviceId !== myDevId && isDeviceSessionStillAlive(accInDb)) {
-      forceLogoutWithReason(`Akun ini sedang login di perangkat lain (${accInDb.activeDeviceLabel || "Device lain"}).`);
-      return;
-    }
-
-    accInDb.activeDeviceId = myDevId;
-    accInDb.activeDeviceLabel = getDeviceLabel();
-    accInDb.lastActiveAt = lastInteractionAt;
-    saveDB();
-  }, HEARTBEAT_INTERVAL_MS);
-
-  // Polling sinkronisasi data lintas device/browser dari Cloud
-  cloudPollTimerId = setInterval(() => {
-    pullDatabaseFromCloud(true);
-  }, CLOUD_POLL_INTERVAL_MS);
-}
-
-function stopSessionWatchers() {
-  if (inactivityTimerId) { clearInterval(inactivityTimerId); inactivityTimerId = null; }
-  if (heartbeatTimerId) { clearInterval(heartbeatTimerId); heartbeatTimerId = null; }
-  if (cloudPollTimerId) { clearInterval(cloudPollTimerId); cloudPollTimerId = null; }
-}
-
-["mousemove", "mousedown", "keydown", "touchstart", "scroll", "click"].forEach(evtName => {
-  window.addEventListener(evtName, recordUserActivity, { passive: true });
-});
-
-async function doLogin() {
+// ==================== AUTHENTICATION & LUPA SANDI ====================
+function doLogin() {
   const u = $("#lu").value.trim().toLowerCase();
   const p = $("#lp").value;
   const m = $("#lm");
   if (!u || !p) { m.textContent = "Harap isi username dan password."; return; }
-
-  // Tarik pembaruan data terbaru dulu (jika terhubung Cloud) sebelum mengecek kunci device
-  if (getEffectiveCloudUrl(DB)) {
-    m.textContent = "Memeriksa status sesi & sinkronisasi data...";
-    await pullDatabaseFromCloud(true);
-  }
 
   const acc = DB.akun.find(x => x.u.toLowerCase() === u);
   if (!acc || acc.pw !== p) {
@@ -1884,24 +1569,9 @@ async function doLogin() {
     return;
   }
 
-  const myDevId = getDeviceId();
-  if (acc.activeDeviceId && acc.activeDeviceId !== myDevId && isDeviceSessionStillAlive(acc)) {
-    const sisaMenit = Math.max(1, Math.ceil((INACTIVITY_LIMIT_MS - (Date.now() - Number(acc.lastActiveAt))) / 60000));
-    m.textContent = `Login ditolak: Akun @${acc.u} sedang aktif di perangkat lain (${acc.activeDeviceLabel || "Device lain"}). Keluar dari perangkat tersebut atau tunggu ±${sisaMenit} menit tanpa aktivitas.`;
-    return;
-  }
-
   m.textContent = "";
-  acc.activeDeviceId = myDevId;
-  acc.activeDeviceLabel = getDeviceLabel();
-  acc.lastActiveAt = Date.now();
   ses = acc;
-  saveDB();
-
-  try {
-    localStorage.setItem("IMMA28_SES_U", acc.u);
-    localStorage.setItem("IMMA28_LAST_ACTIVE", String(acc.lastActiveAt));
-  } catch (e) {}
+  try { localStorage.setItem("IMMA28_SES_U", acc.u); } catch (e) {}
   enterApp();
 }
 
@@ -1911,26 +1581,11 @@ function enterApp() {
   $("#app").hidden = false;
   view = "home";
   kasTab = "tanggungan";
-  startSessionWatchers();
   render();
 }
 
 function logout() {
-  stopSessionWatchers();
-  const myDevId = getDeviceId();
-  if (ses) {
-    const accInDb = DB.akun.find(x => x.u === ses.u);
-    if (accInDb && accInDb.activeDeviceId === myDevId) {
-      accInDb.activeDeviceId = "";
-      accInDb.activeDeviceLabel = "";
-      accInDb.lastActiveAt = 0;
-      saveDB();
-    }
-  }
-  try {
-    localStorage.removeItem("IMMA28_SES_U");
-    localStorage.removeItem("IMMA28_LAST_ACTIVE");
-  } catch (e) {}
+  try { localStorage.removeItem("IMMA28_SES_U"); } catch (e) {}
   ses = null; admin = false;
   $("#app").hidden = true;
   $("#login").hidden = false;
@@ -3635,30 +3290,24 @@ const V = {
       h += `<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
         <button class="btn" style="flex:1;min-width:150px" onclick="openAccountModal()">+ Tambah Akun</button>
         <button class="btn btn-gr" style="flex:1;min-width:180px" onclick="bulkCreateAccounts()">⚡ Generate Akun Semua Anggota</button>
-        <button class="btn btn-out" style="flex:1;min-width:180px" onclick="openCloudSyncModal()">☁️ Sinkronisasi Cloud Deploy</button>
       </div>`;
 
-      h += [...DB.akun].sort((a, b) => (a.role === b.role ? a.u.localeCompare(b.u) : a.role === "admin" ? -1 : 1)).map(a => {
-        const isLockedOnDevice = isDeviceSessionStillAlive(a);
-        return `
-        <div class="card row" style="flex-wrap:wrap">
+      h += [...DB.akun].sort((a, b) => (a.role === b.role ? a.u.localeCompare(b.u) : a.role === "admin" ? -1 : 1)).map(a => `
+        <div class="card row">
           <div class="who">
             ${renderPhoto3x4(getMemberPhoto(a), a.nama || a.u, "photo-3x4-sm")}
             <div style="min-width:0">
               <b>${esc(a.u)}</b> <span class="tag ${a.role === "admin" ? "putra" : ""}">${a.role === "admin" ? "Admin" : "Anggota"}</span>
               ${a.pendingPw ? `<span class="tag pend">Minta Ganti Sandi</span>` : ""}
-              ${isLockedOnDevice ? `<span class="tag lunas">🟢 Aktif di ${esc(a.activeDeviceLabel || "1 Device")}</span>` : `<span class="tag">⚪ Offline</span>`}
               <div class="mut">${esc(a.nama || "-")} · Sandi: <code>${esc(a.pw)}</code></div>
             </div>
           </div>
           <div class="ab">
-            ${isLockedOnDevice && a.u !== ses.u ? `<button class="btn btn-sm btn-out" onclick="releaseDeviceSession('${a.u}')" title="Lepas kunci perangkat agar akun bisa login di device lain">🔓 Lepas Sesi</button>` : ""}
             <button class="ed" onclick="openAccountModal('${a.u}')">Edit</button>
             ${a.u !== ses.u ? `<button class="del" onclick="delAccount('${a.u}')">Hapus</button>` : ""}
           </div>
         </div>
-      `;
-      }).join("");
+      `).join("");
     }
 
     if (tab === "agt") {
@@ -4141,82 +3790,6 @@ function rejectPw(u) {
   render();
 }
 
-function releaseDeviceSession(u) {
-  if (!admin) return;
-  const acc = DB.akun.find(x => x.u === u);
-  if (!acc) return;
-  confirmDialog(
-    "Lepas Kunci Perangkat Akun",
-    `Akhiri sesi aktif akun @${u} (${acc.activeDeviceLabel || "Device"}) sehingga akun tersebut dapat login di perangkat baru?`,
-    () => {
-      acc.activeDeviceId = "";
-      acc.activeDeviceLabel = "";
-      acc.lastActiveAt = 0;
-      saveDB();
-      toast(`Sesi perangkat akun @${u} berhasil dilepas.`);
-      render();
-    }
-  );
-}
-
-function openCloudSyncModal() {
-  if (!admin) return;
-  const curUrl = DB.settings?.cloudSyncUrl || "";
-  const appsScriptCode = `// Google Apps Script (Deploy sebagai Web App - Akses: Anyone)
-const PROP = PropertiesService.getScriptProperties();
-function doGet(e) {
-  const raw = PROP.getProperty("IMMA28_DB") || "{}";
-  return ContentService.createTextOutput(JSON.stringify({ ok: true, db: JSON.parse(raw) }))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-function doPost(e) {
-  const body = JSON.parse(e.postData.contents || "{}");
-  if (body.action === "save_db" && body.db) {
-    PROP.setProperty("IMMA28_DB", JSON.stringify(body.db));
-    return ContentService.createTextOutput(JSON.stringify({ ok: true }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-  return ContentService.createTextOutput(JSON.stringify({ ok: false }))
-    .setMimeType(ContentService.MimeType.JSON);
-}`;
-
-  modal(`
-    <b>☁️ Sinkronisasi Data Real-Time Lintas Device (Deploy)</b>
-    <p class="mut" style="margin:6px 0 10px">
-      Agar seluruh perubahan data (kas, tanggungan, biodata, foto, pengumuman, dan kunci sesi login 1 device) otomatis tersinkron ke semua HP/laptop setelah aplikasi di-deploy, masukkan URL <b>Firebase Realtime Database</b> atau <b>Google Apps Script Web App</b>:
-    </p>
-    <div class="fl">URL Cloud Sync (Firebase .json / Google Apps Script /exec)</div>
-    <input class="in2" id="cloud-sync-inp" placeholder="https://nama-project.firebaseio.com/imma28_db.json atau https://script.google.com/macros/s/.../exec" value="${esc(curUrl)}">
-
-    <details style="background:var(--bg);padding:10px 12px;border-radius:12px;margin-bottom:12px;font-size:12px">
-      <summary style="cursor:pointer;font-weight:700;color:var(--b2)">📋 Lihat Kode Google Apps Script Gratis (Siap Pakai)</summary>
-      <p class="mut" style="margin:6px 0">1. Buka <b>script.google.com</b> → Proyek Baru → tempel kode di bawah.<br>2. Klik <b>Deploy → New Deployment → Web App</b> (Execute as: <i>Me</i>, Who has access: <i>Anyone</i>).<br>3. Salin URL <code>/exec</code> ke kolom di atas.</p>
-      <textarea class="in2" rows="7" readonly onclick="this.select()" style="font-family:monospace;font-size:11px;margin-bottom:0">${esc(appsScriptCode)}</textarea>
-    </details>
-
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn" style="flex:1" onclick="saveCloudSyncSettings()">💾 Simpan &amp; Sinkronkan</button>
-      <button class="btn btn-gr" style="flex:1" onclick="pullDatabaseFromCloud(false)">🔄 Tarik Data Server</button>
-      <button class="btn btn-mut" style="flex:1" onclick="closeM()">Tutup</button>
-    </div>
-  `);
-}
-
-function saveCloudSyncSettings() {
-  const url = ($("#cloud-sync-inp")?.value || "").trim();
-  DB.settings.cloudSyncUrl = url;
-  saveDB();
-  closeM();
-  if (url) {
-    toast("URL Cloud Sync disimpan! Menyinkronkan seluruh data...");
-    pullDatabaseFromCloud(false);
-  } else {
-    cloudSyncStatus = "lokal";
-    updateCloudBadgeUI();
-    toast("Mode sinkronisasi lokal diaktifkan.");
-  }
-}
-
 function openAccountModal(u) {
   const a = u ? DB.akun.find(x => x.u === u) : { u: "", pw: "", role: "anggota", nama: "", memberId: "" };
   modal(`
@@ -4383,7 +3956,6 @@ function render() {
 
   $("#view").innerHTML = V[view]();
   renderThemeSwitchers();
-  updateCloudBadgeUI();
 
   if (view === "biodata") renderBioList();
   if (view === "album" && (!DB.album || DB.album.length === 0) && !albumLoading && !albumSyncMsg) { syncAlbumFromGoogleDrive(true); }
@@ -4394,42 +3966,234 @@ function render() {
   }
 }
 
+// ==================== SINKRONISASI REALTIME ANTAR PERANGKAT ====================
+// Isi RT_DEFAULT_URL dengan URL Firebase Realtime Database agar semua perangkat otomatis terhubung,
+// atau atur per perangkat lewat tombol status di pojok layar.
+const RT_DEFAULT_URL = ""; // contoh: "https://imma28-default-rtdb.asia-southeast1.firebasedatabase.app"
+const RT_URL_KEY = "IMMA28_RT_URL";
+const RT_COLLS = ["members", "akun", "kas", "news", "tanggungan", "album"];
+const RT_OBJS = ["settings", "struktur"];
+const RT = { url: "", es: null, tree: null, last: {}, timer: null, inflight: false, again: false, failed: false, retry: null, apply: null, status: "off", renderPending: false, seeded: false };
+
+function rtUrl() {
+  if (RT_DEFAULT_URL.trim()) return RT_DEFAULT_URL.trim().replace(/\/+$/, ""); // terkunci permanen
+  let u = "";
+  try { u = localStorage.getItem(RT_URL_KEY) || ""; } catch (e) {}
+  return u.trim().replace(/\/+$/, "");
+}
+const rtLocked = () => !!RT_DEFAULT_URL.trim();
+const rtKey = k => String(k).replace(/[.$#\[\]\/%]/g, c => "_" + c.charCodeAt(0).toString(16) + "_");
+
+// JSON kanonik: kunci terurut, tanpa null/array kosong/objek kosong (meniru perilaku Firebase)
+function rtStable(v) {
+  if (Array.isArray(v)) { const a = v.map(rtStable).filter(x => x !== undefined); return a.length ? a : undefined; }
+  if (v && typeof v === "object") {
+    const o = {}; Object.keys(v).sort().forEach(k => { const x = rtStable(v[k]); if (x !== undefined) o[k] = x; });
+    return Object.keys(o).length ? o : undefined;
+  }
+  return v === null || v === undefined ? undefined : v;
+}
+function rtFlatten(data) {
+  const out = {};
+  const memById = new Map((data.members || []).map(m => [m.id, m]));
+  RT_COLLS.forEach(c => {
+    (Array.isArray(data[c]) ? data[c] : []).forEach((it, i) => {
+      const id = c === "akun" ? it.u : it.id;
+      if (!id) return;
+      const o = { ...it, _o: i };
+      if (c === "akun" && it.memberId) { const m = memById.get(it.memberId); if (m && m.foto && it.foto === m.foto) o.foto = ""; }
+      out[c + "/" + rtKey(id)] = JSON.stringify(rtStable(o));
+    });
+  });
+  RT_OBJS.forEach(k => { if (data[k] && typeof data[k] === "object") out[k] = JSON.stringify(rtStable(data[k])); });
+  return out;
+}
+
+function rtStatus() {
+  let p = document.getElementById("rt-pill");
+  if (!p) {
+    p = document.createElement("div"); p.id = "rt-pill"; p.onclick = openRtSettings;
+    document.body.appendChild(p);
+  }
+  const dirty = RT.timer || RT.inflight;
+  let t;
+  if (!RT.url) t = "☁️ Sinkron: nonaktif";
+  else if (RT.failed) t = "🔴 Gagal kirim · mencoba lagi";
+  else if (RT.status === "offline") t = "🟠 Offline";
+  else if (RT.status === "connecting") t = "⏳ Menyambung…";
+  else t = dirty ? "🔄 Mengirim…" : "🟢 Realtime";
+  p.textContent = t;
+}
+
+function rtSchedulePush() {
+  if (!RT.url) return;
+  clearTimeout(RT.timer);
+  RT.timer = setTimeout(rtPush, 500);
+  rtStatus();
+}
+async function rtPush() {
+  RT.timer = null;
+  if (!RT.url) return;
+  if (RT.inflight) { RT.again = true; return; }
+  const now = rtFlatten(DB), patch = {};
+  let n = 0;
+  for (const p in now) if (RT.last[p] !== now[p]) { patch[p] = JSON.parse(now[p]); n++; }
+  for (const p in RT.last) if (!(p in now)) { patch[p] = null; n++; }
+  if (!n) { RT.failed = false; rtStatus(); rtQueueApply(); return; }
+  RT.inflight = true; rtStatus();
+  try {
+    const res = await fetch(RT.url + "/.json", { method: "PATCH", body: JSON.stringify(patch) });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    for (const p in patch) { if (patch[p] === null) delete RT.last[p]; else RT.last[p] = now[p]; }
+    RT.failed = false;
+  } catch (e) {
+    RT.failed = true;
+    clearTimeout(RT.retry); RT.retry = setTimeout(rtPush, 5000);
+  }
+  RT.inflight = false;
+  if (RT.again) { RT.again = false; rtSchedulePush(); }
+  else if (!RT.failed) rtQueueApply();
+  rtStatus();
+}
+
+function rtSetAt(segs, val) {
+  if (!RT.tree || typeof RT.tree !== "object") RT.tree = {};
+  let o = RT.tree;
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (!o[segs[i]] || typeof o[segs[i]] !== "object") o[segs[i]] = {};
+    o = o[segs[i]];
+  }
+  const k = segs[segs.length - 1];
+  if (val === null || val === undefined) delete o[k]; else o[k] = val;
+}
+function rtOnEvent(type, e) {
+  let d; try { d = JSON.parse(e.data); } catch (err) { return; }
+  const base = (d.path || "/").split("/").filter(Boolean);
+  if (type === "put") {
+    if (!base.length) RT.tree = d.data; else rtSetAt(base, d.data);
+  } else if (d.data && typeof d.data === "object") {
+    Object.keys(d.data).forEach(k => rtSetAt(base.concat(k.split("/").filter(Boolean)), d.data[k]));
+  }
+  RT.status = "on";
+  rtQueueApply();
+}
+function rtQueueApply() { clearTimeout(RT.apply); RT.apply = setTimeout(rtApplyTree, 150); }
+
+function rtApplyTree() {
+  if (!RT.url || RT.timer || RT.inflight || RT.failed) return; // tunggu perubahan lokal terkirim dulu
+  const t = RT.tree;
+  if (!t || typeof t !== "object" || !t.members) {
+    // Server masih kosong -> unggah data perangkat ini sebagai data awal
+    if (!RT.seeded) { RT.seeded = true; rtSchedulePush(); }
+    rtStatus();
+    return;
+  }
+  const nd = { ...DB };
+  RT_COLLS.forEach(c => {
+    nd[c] = Object.values(t[c] || {})
+      .filter(x => x && typeof x === "object")
+      .sort((a, b) => (a._o ?? 0) - (b._o ?? 0))
+      .map(x => { const y = { ...x }; delete y._o; return y; });
+  });
+  if (t.settings) nd.settings = { ...DEFAULT_SETTINGS, ...t.settings };
+  if (t.struktur) nd.struktur = t.struktur;
+  RT.last = rtFlatten(nd);          // cerminan isi server
+  syncAllData(nd);
+  if (JSON.stringify(rtFlatten(nd)) === JSON.stringify(rtFlatten(DB))) { rtStatus(); return; }
+  DB = nd;
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(DB)); } catch (e) {}
+  if (ses) {
+    const r = DB.akun.find(a => a.u === ses.u);
+    if (r) { ses = r; admin = ses.role === "admin"; }
+    rtRender();
+  }
+  rtStatus();
+}
+
+function rtRender() {
+  const a = document.activeElement;
+  const typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+  if (typing || document.getElementById("ov")) { RT.renderPending = true; return; }
+  RT.renderPending = false;
+  render();
+}
+setInterval(() => { if (RT.renderPending) rtRender(); }, 1500);
+
+function rtStop() {
+  if (RT.es) { RT.es.close(); RT.es = null; }
+  clearTimeout(RT.retry); clearTimeout(RT.timer); clearTimeout(RT.apply);
+  RT.timer = null; RT.failed = false; RT.inflight = false;
+}
+function rtStart() {
+  rtStop();
+  RT.url = rtUrl(); RT.tree = null; RT.last = {}; RT.seeded = false;
+  if (!RT.url) { RT.status = "off"; rtStatus(); return; }
+  RT.status = "connecting"; rtStatus();
+  let es;
+  try { es = new EventSource(RT.url + "/.json"); } catch (e) { RT.status = "offline"; rtStatus(); return; }
+  RT.es = es;
+  es.addEventListener("put", e => rtOnEvent("put", e));
+  es.addEventListener("patch", e => rtOnEvent("patch", e));
+  es.onopen = () => { RT.status = "on"; rtStatus(); };
+  es.onerror = () => {
+    RT.status = "offline"; rtStatus();
+    if (es.readyState === 2) setTimeout(rtStart, 4000);
+  };
+}
+
+function openRtSettings() {
+  if (rtLocked()) {
+    modal(`
+      <div class="row" style="margin-bottom:10px"><b>☁️ Sinkronisasi Realtime</b>
+        <button class="btn btn-sm btn-mut" onclick="closeM()">✕</button></div>
+      <div class="mut" style="font-size:13px">Sinkronisasi aktif permanen. Semua perangkat otomatis terhubung dan tersambung ulang sendiri, tidak perlu pengaturan lagi.</div>
+      <div class="mut" style="font-size:12px;margin-top:8px">Status: <b>${esc(document.getElementById("rt-pill").textContent)}</b></div>
+      <button class="btn" style="width:100%;margin-top:12px" onclick="rtStart();closeM()">🔄 Sambungkan ulang sekarang</button>
+    `);
+    return;
+  }
+  modal(`
+    <div class="row" style="margin-bottom:10px"><b>☁️ Sinkronisasi Realtime Antar Perangkat</b>
+      <button class="btn btn-sm btn-mut" onclick="closeM()">✕</button></div>
+    <div class="mut" style="font-size:12px;margin-bottom:8px">Isi URL Firebase Realtime Database. Agar permanen untuk semua perangkat, tulis URL ini di konstanta RT_DEFAULT_URL pada file.</div>
+    <div class="fl">URL Realtime Database</div>
+    <input class="in2" id="rt-url" placeholder="https://nama-proyek-default-rtdb.firebaseio.com" value="${esc(rtUrl())}">
+    <div style="display:flex;gap:10px;margin-top:12px">
+      <button class="btn" style="flex:1" onclick="saveRtSettings()">Simpan &amp; Hubungkan</button>
+      <button class="btn btn-mut" style="flex:1" onclick="closeM()">Batal</button>
+    </div>
+  `);
+}
+function saveRtSettings(off) {
+  const v = off ? "" : (document.getElementById("rt-url").value || "").trim().replace(/\/+$/, "");
+  if (v && !/^https:\/\/.+/.test(v)) { toast("URL harus diawali https://"); return; }
+  try { if (v) localStorage.setItem(RT_URL_KEY, v); else localStorage.removeItem(RT_URL_KEY); } catch (e) {}
+  closeM();
+  rtStart();
+  toast(v ? "Menghubungkan ke server realtime..." : "Sinkronisasi realtime dinonaktifkan");
+}
+
+rtReady = true;
+window.addEventListener("load", rtStart);
+function rtEnsure() {
+  if (!rtUrl()) return;
+  if (!RT.es || RT.es.readyState === 2) { rtStart(); return; }
+  if (RT.failed && !RT.inflight) rtPush();
+}
+window.addEventListener("online", rtEnsure);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) rtEnsure(); });
+setInterval(rtEnsure, 15000);
+
 // Terapkan tema sedini mungkin dan pulihkan sesi saat halaman dimuat
 applyTheme(getSavedTheme(), false);
 
-window.addEventListener("load", async () => {
+window.addEventListener("load", () => {
   applyTheme(getSavedTheme(), false);
-  updateCloudBadgeUI();
-  if (getEffectiveCloudUrl(DB)) {
-    await pullDatabaseFromCloud(true);
-  }
   try {
     const savedU = localStorage.getItem("IMMA28_SES_U") || localStorage.getItem("SIAKAD_SES_U");
-    const lastAct = Number(localStorage.getItem("IMMA28_LAST_ACTIVE") || 0);
     if (savedU) {
-      if (lastAct && (Date.now() - lastAct >= INACTIVITY_LIMIT_MS)) {
-        localStorage.removeItem("IMMA28_SES_U");
-        localStorage.removeItem("IMMA28_LAST_ACTIVE");
-        const lm = $("#lm");
-        if (lm) lm.textContent = "Sesi berakhir karena tidak ada interaksi selama 10 menit. Silakan login ulang.";
-        return;
-      }
       const acc = DB.akun.find(x => x.u === savedU);
-      const myDevId = getDeviceId();
-      if (acc) {
-        if (acc.activeDeviceId && acc.activeDeviceId !== myDevId && isDeviceSessionStillAlive(acc)) {
-          localStorage.removeItem("IMMA28_SES_U");
-          const lm = $("#lm");
-          if (lm) lm.textContent = `Akun ini sedang aktif di perangkat lain (${acc.activeDeviceLabel || "Device lain"}).`;
-          return;
-        }
-        acc.activeDeviceId = myDevId;
-        acc.activeDeviceLabel = getDeviceLabel();
-        acc.lastActiveAt = Date.now();
-        ses = acc;
-        saveDB();
-        enterApp();
-      }
+      if (acc) { ses = acc; enterApp(); }
     }
   } catch (e) {}
 });
